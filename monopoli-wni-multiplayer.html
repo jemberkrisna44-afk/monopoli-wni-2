@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Monopoli WNI Multiplayer</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#10251e;color:#fff;font-family:Arial,sans-serif}
+header{background:#075b3b;text-align:center;padding:16px}h1{margin:0;color:#ffd54a;font-size:25px}
+main{max-width:900px;margin:auto;padding:12px}.panel{background:#1b3b30;padding:14px;border-radius:14px;margin:12px 0}
+input,button{padding:12px;border:0;border-radius:9px;font-size:15px;max-width:100%}
+input{width:100%;margin:5px 0;background:#fff;color:#222}button{background:#ffc83d;color:#241d0d;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#d9e7df}.danger{background:#ff9b87}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}.players{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.player{background:#294b3c;padding:10px;border-radius:10px;border-left:5px solid #ddd}
+.active{outline:3px solid #ffcf43}.board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+.tile{background:#eee;color:#222;border-radius:7px;min-height:95px;padding:6px 3px;text-align:center;display:flex;flex-direction:column;justify-content:space-between;font-size:11px;overflow-wrap:anywhere}
+.tile .name{font-weight:bold;font-size:12px}.tile .price{color:#087044}.tile .owner{font-size:10px;color:#9b3b20}
+.start{background:#a5e7b4}.tax{background:#ffd2b8}.chance,.fund{background:#ffe7a1}
+.hidden{display:none!important}.center{text-align:center}#dice{font-size:46px;margin:8px}
+#log{height:140px;overflow:auto;background:#10251e;padding:10px;border-radius:8px;font-size:13px}
+small,.muted{color:#cbd8cf}.status{padding:10px;background:#10251e;border-radius:9px}
+@media(max-width:420px){.tile{min-height:82px;font-size:10px}.tile .name{font-size:11px}.players{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<header><h1>🇮🇩 MONOPOLI WNI</h1><div>Nusantara Edition • Multiplayer 2–4 HP</div></header>
+<main>
+<section id="lobby" class="panel">
+<h2>🎮 Masuk permainan</h2>
+<label>Nama pemain</label><input id="playerName" maxlength="16" placeholder="Contoh: Andi">
+<div class="row">
+<button onclick="createRoom()">Buat Ruangan (Host)</button>
+</div>
+<hr style="border-color:#426454;margin:16px 0">
+<label>Kode ruangan dari host</label><input id="roomCode" maxlength="6" placeholder="Contoh: A1B2C3" style="text-transform:uppercase">
+<button class="secondary" onclick="joinRoom()" style="width:100%">Gabung Ruangan</button>
+<p id="connectionStatus" class="muted">Pilih buat ruangan atau gabung ruangan. Kedua HP harus terhubung ke internet.</p>
+</section>
+
+<section id="roomPanel" class="panel hidden">
+<h2>🏠 Ruangan</h2>
+<div id="roomInfo"></div>
+<div id="waitingPlayers" class="players" style="margin:12px 0"></div>
+<button id="startButton" onclick="startGame()" class="hidden" style="width:100%">Mulai permainan</button>
+<p id="waitingText" class="muted">Menunggu host memulai permainan...</p>
+</section>
+
+<section id="game" class="hidden">
+<div class="panel"><h3>👥 Pemain</h3><div id="players" class="players"></div></div>
+<div class="panel"><h3 class="center">🗺️ Papan Nusantara</h3><div id="board" class="board"></div></div>
+<div class="panel center">
+<h3 id="turnTitle">Giliran</h3><div id="dice">🎲</div>
+<div id="gameStatus" class="status">Menunggu permainan...</div>
+<div class="row" style="margin-top:10px">
+<button id="rollButton" onclick="sendAction('roll')">🎲 Lempar dadu</button>
+<button id="buyButton" onclick="sendAction('buy')" disabled>🏠 Beli kota</button>
+<button id="endButton" onclick="sendAction('end')" disabled>➡️ Akhiri giliran</button>
+</div>
+</div>
+<div class="panel"><h3>📜 Catatan permainan</h3><div id="log"></div></div>
+<div class="panel center"><button class="danger" onclick="location.reload()">Keluar / mulai ulang</button></div>
+</section>
+</main>
+<script>
+const places=[
+{name:"START",type:"start"},{name:"Jakarta",price:2000,rent:400},{name:"Pajak",type:"tax"},
+{name:"Bandung",price:1500,rent:300},{name:"Kesempatan",type:"chance"},{name:"Yogyakarta",price:1800,rent:350},
+{name:"Surabaya",price:2200,rent:450},{name:"Dana Umum",type:"fund"},{name:"Bali",price:2500,rent:500},
+{name:"Makassar",price:2000,rent:400},{name:"Pajak Negara",type:"tax"},{name:"Medan",price:2300,rent:450},
+{name:"Kesempatan",type:"chance"},{name:"Lombok",price:1800,rent:350},{name:"Papua",price:2800,rent:550},
+{name:"Dana Umum",type:"fund"}
+];
+const colors=["#e74c3c","#3498db","#f1c40f","#a66be0"];
+let peer=null,host=false,roomId="",connections=[],players=[],myIndex=-1,state=null,roomReady=false;
+const $=id=>document.getElementById(id);
+function setStatus(t){$("connectionStatus").textContent=t}
+function addLog(t){if(!$("log"))return;$("log").innerHTML="<div>• "+escapeHtml(t)+"</div>"+$("log").innerHTML}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function nameValue(){return $("playerName").value.trim().slice(0,16)||"Pemain"}
+function money(v){return "Rp"+Number(v).toLocaleString("id-ID")}
+function showRoom(){
+$("lobby").classList.add("hidden");$("roomPanel").classList.remove("hidden");
+$("roomInfo").innerHTML=host?`<b>Kode ruangan: <span style="color:#ffd54a;font-size:24px">${roomId}</span></b><br><small>Bagikan kode ini kepada teman.</small>`:`<b>Terhubung ke ruangan ${roomId}</b>`;
+renderLobby();
+}
+function renderLobby(){
+$("waitingPlayers").innerHTML=players.map((p,i)=>`<div class="player" style="border-color:${colors[i]}"><b>${escapeHtml(p.name)}</b><br><small>${i===0?"Host":"Pemain "+(i+1)}</small></div>`).join("");
+if(host){$("startButton").classList.toggle("hidden",players.length<2);$("waitingText").textContent=players.length<2?"Butuh minimal 2 pemain. Bagikan kode ruangan.":players.length+"/4 pemain siap. Tekan Mulai permainan."}
+else $("waitingText").textContent="Menunggu host memulai permainan...";
+}
+function createRoom(){
+if(typeof Peer==="undefined"){setStatus("PeerJS gagal dimuat. Periksa internet dan muat ulang halaman.");return}
+host=true;roomId=Math.random().toString(36).slice(2,8).toUpperCase();
+const peerId="wni-"+roomId.toLowerCase();
+setStatus("Sedang membuat ruangan...");
+peer=new Peer(peerId);
+peer.on("open",()=>{players=[{name:nameValue(),money:15000,pos:0,owned:[],alive:true}];myIndex=0;roomReady=true;showRoom();setStatus("Ruangan berhasil dibuat.");});
+peer.on("connection",conn=>{
+conn.on("open",()=>{
+if(players.length>=4){conn.send({type:"reject",message:"Ruangan sudah penuh."});conn.close();return}
+const idx=players.length;players.push({name:(conn.metadata&&conn.metadata.name)||"Pemain "+(idx+1),money:15000,pos:0,owned:[],alive:true});
+connections.push({conn,index:idx});
+conn.send({type:"welcome",index:idx,room:roomId,players});
+broadcast({type:"lobby",players});
+renderLobby();
+conn.on("data",data=>handleHostData(conn,data));
+conn.on("close",()=>{const p=connections.find(x=>x.conn===conn);if(p&&state&&!state.finished){addLog("Koneksi pemain "+players[p.index].name+" terputus.");}});
+});
+});
+peer.on("error",e=>setStatus("Koneksi gagal: "+e.type+". Coba buat ruangan baru atau muat ulang."));
+}
+function joinRoom(){
+if(typeof Peer==="undefined"){setStatus("PeerJS gagal dimuat. Periksa internet dan muat ulang halaman.");return}
+roomId=$("roomCode").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");
+if(roomId.length<4){setStatus("Masukkan kode ruangan yang benar.");return}
+host=false;setStatus("Sedang menghubungkan ke host...");
+peer=new Peer();
+peer.on("open",()=>{
+const conn=peer.connect("wni-"+roomId.toLowerCase(),{reliable:true,metadata:{name:nameValue()}});
+let welcomed=false;
+conn.on("open",()=>{window.hostConnection=conn;setStatus("Terhubung. Menunggu data ruangan...");});
+conn.on("data",data=>{
+if(data.type==="reject"){setStatus(data.message);conn.close();return}
+if(data.type==="welcome"){welcomed=true;myIndex=data.index;players=data.players;showRoom();setStatus("Berhasil bergabung!");}
+else if(data.type==="lobby"){players=data.players;renderLobby();}
+else if(data.type==="start"){state=data.state;players=state.players;enterGame();renderGame();}
+else if(data.type==="state"){state=data.state;players=state.players;enterGame();renderGame();}
+});
+conn.on("close",()=>{setStatus("Koneksi ke host terputus.");});
+conn.on("error",()=>setStatus("Tidak bisa terhubung. Periksa kode dan internet."));
+});
+peer.on("error",e=>setStatus("Gagal bergabung: "+e.type+". Periksa kode ruangan dan internet."));
+}
+function broadcast(message){connections.forEach(x=>{if(x.conn.open)x.conn.send(message)})}
+function handleHostData(conn,data){
+if(!data||!state)return;
+const item=connections.find(x=>x.conn===conn);if(!item)return;
+if(data.type==="action")applyAction(item.index,data.action);
+}
+function startGame(){
+if(!host||players.length<2)return;
+state={players:players.map(p=>({...p,owned:[]})),current:0,rolled:false,finished:false,lastDice:"🎲",message:"Permainan dimulai! Giliran "+players[0].name};
+addLog("Permainan dimulai. Setiap pemain mendapat Rp15.000.");
+broadcast({type:"start",state});
+enterGame();renderGame();
+}
+function enterGame(){$("roomPanel").classList.add("hidden");$("game").classList.remove("hidden")}
+function sendAction(action){
+if(host)applyAction(myIndex,action);
+else if(window.hostConnection&&window.hostConnection.open)window.hostConnection.send({type:"action",action});
+}
+function applyAction(index,action){
+if(!state||state.finished||index!==state.current||!state.players[index].alive)return;
+const p=state.players[index];
+if(action==="roll"&&!state.rolled){
+const d=1+Math.floor(Math.random()*6),old=p.pos;p.pos=(p.pos+d)%places.length;
+state.lastDice=["⚀","⚁","⚂","⚃","⚄","⚅"][d-1];
+if(p.pos<old){p.money+=2000;state.message=p.name+" melewati START dan mendapat Rp2.000."}
+else state.message=p.name+" mendapat angka "+d+" dan berhenti di "+places[p.pos].name+".";
+state.rolled=true;
+const t=places[p.pos];
+if(t.price){
+const ownerIndex=state.players.findIndex((x,i)=>i!==index&&x.alive&&x.owned.includes(p.pos));
+if(ownerIndex>=0){p.money-=t.rent;state.players[ownerIndex].money+=t.rent;state.message=p.name+" membayar sewa "+money(t.rent)+" kepada "+state.players[ownerIndex].name+".";bankrupt(p)}
+else if(!p.owned.includes(p.pos)){state.message+=" Kota ini tersedia untuk dibeli seharga "+money(t.price)+"."}
+}else if(t.type==="tax"){p.money-=1000;state.message=p.name+" membayar pajak Rp1.000.";bankrupt(p)}
+else if(t.type==="chance"){
+const cards=[["Mendapat hadiah lomba nasional",2000],["Membayar biaya perjalanan",-1000],["Mendapat bantuan",-1500],["Mendapat hadiah undian",2500],["Membayar denda",-500]];
+const c=cards[Math.floor(Math.random()*cards.length)];p.money+=c[1];state.message="Kartu Kesempatan: "+p.name+" "+c[0]+" ("+(c[1]>=0?"+":"")+money(c[1])+")";bankrupt(p);
+}else if(t.type==="fund"){const a=500+Math.floor(Math.random()*1500);p.money+=a;state.message=p.name+" mendapat Dana Umum "+money(a)+"."}
+else if(t.type==="start"){p.money+=1000;state.message=p.name+" mendapat bonus START Rp1.000."}
+}else if(action==="buy"&&state.rolled){
+const t=places[p.pos];if(!t.price||p.owned.includes(p.pos)||p.money<t.price)return;
+const ownedByOther=state.players.some((x,i)=>i!==index&&x.owned.includes(p.pos));if(ownedByOther)return;
+p.money-=t.price;p.owned.push(p.pos);state.message=p.name+" membeli "+t.name+" seharga "+money(t.price)+".";
+}else if(action==="end"&&state.rolled){
+const alive=state.players.filter(x=>x.alive);if(alive.length<=1){finishGame();return}
+let next=index;do{next=(next+1)%state.players.length}while(!state.players[next].alive);
+state.current=next;state.rolled=false;state.lastDice="🎲";state.message="Giliran "+state.players[next].name+".";
+}else return;
+if(state.players.filter(x=>x.alive).length<=1)finishGame();
+players=state.players;
+addLog(state.message);
+broadcast({type:"state",state});renderGame();
+}
+function bankrupt(p){if(p.money<0){p.money=0;p.alive=false;state.message+=" "+p.name+" bangkrut dan keluar dari permainan."}}
+function finishGame(){const alive=state.players.filter(p=>p.alive);state.finished=true;state.message=alive.length? "🏆 "+alive[0].name+" memenangkan permainan!":"Permainan selesai.";addLog(state.message)}
+function renderGame(){
+if(!state)return;
+players=state.players;
+$("players").innerHTML=players.map((p,i)=>`<div class="player ${i===state.current&&p.alive?"active":""}" style="border-color:${colors[i]}"><b>${escapeHtml(p.name)}</b><br>${money(p.money)}<br><small>${escapeHtml(places[p.pos].name)} · ${p.owned.length} kota · ${p.alive?"Aktif":"Bangkrut"}</small></div>`).join("");
+$("board").innerHTML=places.map((t,i)=>{
+const owner=state.players.find(p=>p.owned.includes(i));
+const tokens=state.players.filter(p=>p.alive&&p.pos===i).map(p=>"●").join(" ");
+return `<div class="tile ${t.type||""}"><div class="name">${escapeHtml(t.name)}</div><div style="color:#333;font-size:18px">${tokens}</div><div class="price">${t.price?money(t.price):t.type==="tax"?"BAYAR":""}</div><div class="owner">${owner?"Milik "+escapeHtml(owner.name):""}</div></div>`;
+}).join("");
+const p=state.players[state.current],myTurn=myIndex===state.current&&!state.finished&&p.alive;
+$("turnTitle").textContent="Giliran: "+p.name+(myTurn?" (Giliranmu)":"");
+$("dice").textContent=state.lastDice;
+$("gameStatus").textContent=state.message;
+const tile=places[p.pos];
+$("rollButton").disabled=!myTurn||state.rolled;
+$("buyButton").disabled=!myTurn||!state.rolled||!tile.price||p.owned.includes(p.pos)||p.money<tile.price||state.players.some((x,i)=>i!==state.current&&x.owned.includes(p.pos));
+$("endButton").disabled=!myTurn||!state.rolled;
+if(state.finished){$("rollButton").disabled=true;$("buyButton").disabled=true;$("endButton").disabled=true}
+}
+</script>
+</body>
+</html>
